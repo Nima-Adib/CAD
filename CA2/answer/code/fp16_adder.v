@@ -4,17 +4,18 @@
 // Interface identical to the Project-1 adder:
 //     accum <= accum + operand_b      when start_add = 1   (clr_accum has priority)
 //
-// Functional spec (Project-2 / phase-1):
-//   * an operand whose exponent field is 0 (zero / subnormal) is treated as 0
-//   * the exact sum is TRUNCATED (round toward zero), no rounding logic
+// Functional spec (CA2 phase-1, same as the behavioural fp16_adder_1.v):
+//   * an operand is treated as 0 if  exp == 0  or  (frac == 0 and exp != 31)
+//   * if exactly one operand is 0 the result is the other operand (unchanged)
+//   * otherwise the exact sum is TRUNCATED (round toward zero), no rounding logic
 //   * result exponent <= 0  -> result = +0          (underflow)
 //   * result exponent >= 31 -> {sign, 5'h1F, 10'h0} (overflow)
-//   * exact cancellation    -> +0
+//   * exact cancellation / both operands zero -> +0
 //
 // Only the cells c1 / s2 are used (through actel_gates.v):  NO logic operators.
 //
 // Architecture (one clock cycle, everything in front of the accumulator FFs):
-//   nz_detect5 x2 -> mag_cmp15 -> operand_swap -> exp_diff -> align_shifter
+//   operand_valid x2 -> mag_cmp15 -> operand_swap -> exp_diff -> align_shifter
 //   -> addsub12 -> normalizer -> exp_calc -> accumulator (s2 flip-flops)
 //
 // The accumulator flip-flop is an s2 cell whose built-in 4:1 mux performs
@@ -24,12 +25,20 @@
 `timescale 1ns/1ps
 
 // ---------------------------------------------------------------------------
-// nz = (e != 0)                                                   2 x c1
+// valid = operand is NOT treated as zero
+//       = (e != 0) & (f != 0)  |  (e == 31)                         9 x c1
 // ---------------------------------------------------------------------------
-module nz_detect5 (input [4:0] e, output nz);
-    wire lo;
-    g_or  u_lo (.a(e[1]), .b(e[0]), .y(lo));
-    g_or4 u_nz (.a(e[4]), .b(e[3]), .c(e[2]), .d(lo), .y(nz));
+module operand_valid (input [4:0] e, input [9:0] f, output valid);
+    wire lo, nze, u1, u2, nzf, a3, e31, nn;
+    g_or   u_lo  (.a(e[1]), .b(e[0]), .y(lo));
+    g_or4  u_nze (.a(e[4]), .b(e[3]), .c(e[2]), .d(lo), .y(nze));        // e != 0
+    g_or4  u_f1  (.a(f[0]), .b(f[1]), .c(f[2]), .d(f[3]), .y(u1));
+    g_or4  u_f2  (.a(f[4]), .b(f[5]), .c(f[6]), .d(f[7]), .y(u2));
+    g_or4  u_nzf (.a(f[8]), .b(f[9]), .c(u1),   .d(u2),   .y(nzf));      // f != 0
+    g_and3 u_a3  (.a(e[0]), .b(e[1]), .c(e[2]), .y(a3));
+    g_and3 u_e31 (.a(a3),   .b(e[3]), .c(e[4]), .y(e31));                // e == 31
+    g_and  u_nn  (.a(nze),  .b(nzf), .y(nn));
+    g_or   u_v   (.a(e31),  .b(nn),  .y(valid));
 endmodule
 
 // ---------------------------------------------------------------------------
@@ -263,13 +272,16 @@ module fp16_adder (
     wire [15:0] A, B;
     assign A = accum_out;
     assign B = operand_b;
-    wire nza, nzb;
-    nz_detect5 u_nza (.e(A[14:10]), .nz(nza));
-    nz_detect5 u_nzb (.e(B[14:10]), .nz(nzb));
+    wire nza, nzb;                                   // 1 = operand is a valid (non-zero) number
+    operand_valid u_nza (.e(A[14:10]), .f(A[9:0]), .valid(nza));
+    operand_valid u_nzb (.e(B[14:10]), .f(B[9:0]), .valid(nzb));
 
     // ------------------------------------------------------------ which one is bigger
-    wire g;
-    mag_cmp15 u_cmp (.a(A[14:0]), .b(B[14:0]), .ge(g));
+    // g = 1 : A is the bigger operand.  A zero operand is always the smaller one.
+    wire ge, t_ge, g;
+    mag_cmp15 u_cmp (.a(A[14:0]), .b(B[14:0]), .ge(ge));
+    g_mux2 u_tge (.a0(1'b1), .a1(ge), .s(nzb), .y(t_ge));     // B zero -> A bigger
+    g_and  u_g   (.a(nza), .b(t_ge), .y(g));                  // A zero -> B bigger
 
     wire [4:0] ebig;
     wire [9:0] big_f, small_f;
@@ -309,9 +321,15 @@ module fp16_adder (
     exp_calc u_exp (.ebig(ebig), .q(q), .e(e), .under(under), .ovf(ovf));
 
     // ------------------------------------------------------------ result flags
+    // exactly one zero operand -> the result is the other operand unchanged
+    // (so the overflow clean-up {sign,31,0} must not be applied)
+    wire one_zero, ovf_f;
+    g_xor   u_oz   (.a(nza), .b(nzb), .y(one_zero));
+    g_andn  u_ovf  (.a(one_zero), .b(ovf), .y(ovf_f));
+
     wire zero, zo, xf, mz, nclr, start_nz;
     g_or    u_zero (.a(rz), .b(under), .y(zero));          // result is +0
-    g_or    u_zo   (.a(zero), .b(ovf), .y(zo));            // frac must be 0
+    g_or    u_zo   (.a(zero), .b(ovf_f), .y(zo));          // frac must be 0
     g_and   u_xf   (.a(start_add), .b(zo), .y(xf));
     g_and   u_mz   (.a(start_add), .b(zero), .y(mz));
     g_not   u_ncl  (.a(clr_accum), .y(nclr));

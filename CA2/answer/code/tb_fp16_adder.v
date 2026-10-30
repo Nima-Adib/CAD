@@ -1,177 +1,178 @@
 // ============================================================================
-// tb_fp16_adder.v - self-checking testbench for the Actel-cell FP16 adder
-//
-//   DUT   : fp16_adder        (structural, c1 / s2 cells only)
-//   MODEL : fp16_adder_model  (behavioural golden model, fp16_adder_model.v)
-//
-// Both receive exactly the same stimulus; every output is compared after
-// every clock cycle.  gated.txt must exist next to the project and contain 0
-// before the run; at the end of the simulation it holds the gate count.
-//
-// compile order:  modules.v  actel_gates.v  fp16_adder.v  fp16_adder_model.v  tb_fp16_adder.v
+// Testbench : tb_fp16_adder   (CA2 - Phase 1, truncating FP16 adder)
+// Run from the project root (the folder containing answer/ assets/ Makefile):
+//   vlog -sv answer/code/fp16_adder.v answer/code/tb_fp16_adder.v
+//   vsim -c tb_fp16_adder -do "run -all; quit -f"
+// Sections:
+//   1. Directed tests (CA2 special-case rules, truncation, overflow/underflow)
+//   2. Accumulator / control-signal tests (clr priority, hold, add_done)
+//   3. Random+corner vectors from answer/code/sim/vec_add_ab.mem / vec_add_exp.mem
+//      (produced by gen_vec_add_ca2.py)
 // ============================================================================
 `timescale 1ns/1ps
 
 module tb_fp16_adder;
-    reg         clk, rst, clr_accum, start_add, add_bias;
+
+    localparam integer NMAX = 65536;
+
+    reg         clk = 1'b0, rst;
+    reg         clr_accum, start_add;
     reg  [15:0] operand_b;
-    wire [15:0] dut_out, ref_out;
-    wire        dut_done, ref_done;
+    wire [15:0] accum_out;
+    wire        add_done;
 
-    fp16_adder       dut (.clk(clk), .rst(rst), .clr_accum(clr_accum), .start_add(start_add),
-                          .operand_b(operand_b), .add_bias(add_bias),
-                          .accum_out(dut_out), .add_done(dut_done));
-
-    fp16_adder_model ref0 (.clk(clk), .rst(rst), .clr_accum(clr_accum), .start_add(start_add),
-                           .operand_b(operand_b), .add_bias(add_bias),
-                           .accum_out(ref_out), .add_done(ref_done));
-
-    initial clk = 1'b0;
     always #5 clk = ~clk;
 
-    integer errors;
-    integer checks;
-    integer k, m, seed;
-    reg [15:0] ra, rb;
-    reg [4:0]  ea, eb;
+    fp16_adder dut (
+        .clk(clk), .rst(rst),
+        .clr_accum(clr_accum), .start_add(start_add),
+        .operand_b(operand_b), .add_bias(1'b0),
+        .accum_out(accum_out), .add_done(add_done)
+    );
 
-    // ------------------------------------------------------------ checker
-    // called right after a rising edge (outputs have settled)
-    task check;
-        input [255:0] tag;
+    integer errors, total;
+
+    // -------- helpers --------
+    // clear the accumulator (1 cycle)
+    task do_clear;
         begin
-            checks = checks + 1;
-            if (dut_out !== ref_out || dut_done !== ref_done) begin
+            @(negedge clk);
+            clr_accum <= 1'b1; start_add <= 1'b0;
+            @(negedge clk);
+            clr_accum <= 1'b0;
+        end
+    endtask
+
+    // accum <= accum + b  (1 cycle); result visible right after the posedge
+    task do_add(input [15:0] b);
+        begin
+            @(negedge clk);
+            operand_b <= b; start_add <= 1'b1; clr_accum <= 1'b0;
+            @(posedge clk); #1;
+            start_add <= 1'b0;
+        end
+    endtask
+
+    task check(input [15:0] got, input [15:0] expv, input [15:0] a, input [15:0] b,
+               input [255:0] name);
+        begin
+            total = total + 1;
+            if (got !== expv) begin
                 errors = errors + 1;
-                if (errors <= 20)
-                    $display("MISMATCH (%0s) operand_b=%h  dut=%h done=%b   model=%h done=%b  @%0t",
-                             tag, operand_b, dut_out, dut_done, ref_out, ref_done, $time);
+                if (errors <= 40)
+                $display("MISMATCH [%0s] a=%h b=%h exp=%h got=%h", name, a, b, expv, got);
             end
         end
     endtask
 
-    // ------------------------------------------------------------ helpers
-    // accum <= 0
-    task clear_acc;
+    // clear, add a (accum = a), add b, compare with expected
+    task pair(input [15:0] a, input [15:0] b, input [15:0] expv, input [255:0] name);
         begin
-            @(negedge clk);
-            clr_accum = 1'b1; start_add = 1'b0;
-            @(posedge clk); #1;
-            clr_accum = 1'b0;
-            check("clear");
+            do_clear;
+            do_add(a);
+            do_add(b);
+            check(accum_out, expv, a, b, name);
         end
     endtask
 
-    // accum <= accum + b
-    task add_op;
-        input [15:0] b;
-        begin
-            @(negedge clk);
-            operand_b = b; start_add = 1'b1; clr_accum = 1'b0;
-            @(posedge clk); #1;
-            check("add");
-            @(negedge clk);
-            start_add = 1'b0;
-        end
-    endtask
+    // -------- vector memories --------
+    reg [15:0] vecab  [0:NMAX-1];
+    reg [15:0] vecexp [0:NMAX/2-1];
+    integer i, NV;
 
-    // accum = a ; accum <= a + b
-    task pair;
-        input [15:0] a, b;
-        begin
-            clear_acc;
-            add_op(a);
-            add_op(b);
-        end
-    endtask
-
-    // ------------------------------------------------------------ stimulus
     initial begin
-        errors = 0; checks = 0; seed = 12345;
-        rst = 1'b1; clr_accum = 1'b0; start_add = 1'b0; add_bias = 1'b0; operand_b = 16'h0000;
-        repeat (3) @(posedge clk);
-        #1 rst = 1'b0;
-        @(negedge clk);
+        errors = 0; total = 0;
+        rst = 1'b1; clr_accum = 1'b0; start_add = 1'b0; operand_b = 16'h0000;
+        #22 rst = 1'b0;
 
-        // ---------------- directed corner cases ----------------
-        pair(16'h3C00, 16'h3C00);   // 1 + 1
-        pair(16'h3C00, 16'hBC00);   // 1 - 1  -> +0
-        pair(16'h3C00, 16'hB3FF);   // heavy cancellation
-        pair(16'h3C00, 16'hBBFF);
-        pair(16'h4000, 16'hBC01);
-        pair(16'h3C00, 16'h9000);   // truncation with a sticky bit
-        pair(16'h7BFF, 16'h7BFF);   // overflow -> inf
-        pair(16'hFBFF, 16'hFBFF);
-        pair(16'h7BFF, 16'h7400);
-        pair(16'h0400, 16'h8400);   // smallest normal - itself
-        pair(16'h0400, 16'h8401);   // underflow -> 0
-        pair(16'h0401, 16'h8400);
-        pair(16'h0400, 16'h0400);
-        pair(16'h0000, 16'h0000);
-        pair(16'h8000, 16'h8000);
-        pair(16'h8000, 16'h3C00);
-        pair(16'h3C00, 16'h8000);
-        pair(16'h0001, 16'h3C00);   // subnormal operand -> 0
-        pair(16'h3C00, 16'h03FF);
-        pair(16'h7800, 16'h7800);
-        pair(16'h7BFF, 16'h3C00);
-        pair(16'h7C00, 16'h3C00);   // exponent 31 is treated as a normal number
-        pair(16'h3C00, 16'h2400);   // exponent difference 11, 12 ...
-        pair(16'h3C00, 16'h2000);
-        pair(16'h3C00, 16'hA400);
-        pair(16'h3C00, 16'hA000);
-        pair(16'h3C00, 16'hA800);
-        pair(16'h3C00, 16'h8800);
+        // ===================== 1. directed =====================
+        $display("--- directed tests ---");
+        pair(16'h3E00, 16'h3E00, 16'h4200, "1.5+1.5=3");
+        pair(16'h3C01, 16'h3C01, 16'h4001, "carry -> exp+1");
+        pair(16'h3E00, 16'hBC01, 16'h37FC, "sub, normalize left");
+        pair(16'h3E00, 16'hBE00, 16'h0000, "exact cancel -> +0");
+        pair(16'h4200, 16'h3E00, 16'h4480, "3.0+1.5=4.5");
+        pair(16'h3FFF, 16'h13FF, 16'h3FFF, "truncate (RNE would round up)");
+        pair(16'h7BFF, 16'hBC01, 16'h7BFE, "truncate on subtract");
+        pair(16'h3C01, 16'h2401, 16'h3C11, "different exponents");
+        pair(16'h3C01, 16'hB801, 16'h3801, "sub, diff exp 1");
+        // special cases of the CA2 statement
+        pair(16'h0200, 16'h3E00, 16'h3E00, "subnormal a -> 0");
+        pair(16'h3E00, 16'h0200, 16'h3E00, "subnormal b -> 0");
+        pair(16'h3C00, 16'h3E00, 16'h3E00, "a mantissa==0 -> 0");
+        pair(16'h3E00, 16'h3C00, 16'h3E00, "b mantissa==0 -> 0");
+        pair(16'h0000, 16'h8000, 16'h0000, "0 + -0 = 0");
+        pair(16'h0401, 16'h8402, 16'h0000, "underflow -> 0");
+        pair(16'h7801, 16'h7801, 16'h7C00, "overflow -> exp31 mant0");
+        pair(16'hFBFF, 16'hFBFF, 16'hFC00, "negative overflow");
+        pair(16'h7BFF, 16'h7BFF, 16'h7C00, "max+max overflow");
+        pair(16'h7C00, 16'h7C00, 16'h7C00, "sat + sat");
+        pair(16'h7C00, 16'hFC00, 16'h0000, "sat - sat = 0");
+        pair(16'h7C00, 16'h3E00, 16'h7C00, "sat + small");
+        pair(16'h7C00, 16'hFBFF, 16'h5000, "sat - max = 32");
 
-        // ---------------- hold / clear priority ----------------
-        clear_acc;
-        add_op(16'h4248);                       // 3.140625
-        @(negedge clk); operand_b = 16'h3C00; start_add = 1'b0;
-        @(posedge clk); #1; check("hold");      // start_add = 0 -> hold
-        @(negedge clk); start_add = 1'b1; clr_accum = 1'b1;
-        @(posedge clk); #1; check("clr+start"); // clr_accum has priority
-        @(negedge clk); start_add = 1'b0; clr_accum = 1'b0;
+        // ===================== 2. accumulator / control =====================
+        $display("--- accumulator / control tests ---");
+        do_clear;
+        check(accum_out, 16'h0000, 0, 0, "clear");
+        do_add(16'h3E00); check(accum_out, 16'h3E00, 0, 16'h3E00, "chain 1");
+        do_add(16'h3E00); check(accum_out, 16'h4200, 0, 16'h3E00, "chain 2");
+        do_add(16'h3E00); check(accum_out, 16'h4480, 0, 16'h3E00, "chain 3");
 
-        // ---------------- random pairs (all 16-bit patterns) ----------------
-        for (k = 0; k < 6000; k = k + 1) begin
-            ra = $random(seed);
-            rb = $random(seed);
-            pair(ra, rb);
-        end
-
-        // ---------------- random pairs with close exponents (cancellation / sticky) ----------------
-        for (k = 0; k < 8000; k = k + 1) begin
-            ra = $random(seed);
-            ea = ra[14:10];
-            m  = $random(seed);
-            eb = ea + (m[2:0] - 3);             // exponent within +-4 of ea
-            rb = $random(seed);
-            rb[14:10] = eb;
-            if (k % 2 == 0) rb[15] = ~ra[15];   // half of them: effective subtraction
-            if (ea == 5'd0 || ea == 5'd31) ra[14:10] = 5'd15;
-            pair(ra, rb);
-        end
-
-        // ---------------- long accumulations (no clear) ----------------
-        clear_acc;
-        for (k = 0; k < 4000; k = k + 1) begin
-            rb = $random(seed);
-            rb[14:10] = 5'd8 + rb[13:10] % 5'd10;   // exponents 8..17
-            add_op(rb);
-        end
-
-        // ---------------- reset in the middle of operation ----------------
-        @(negedge clk); rst = 1'b1;
+        // add_done follows start_add by one cycle
+        @(negedge clk); operand_b <= 16'h3E00; start_add <= 1'b1;
         @(posedge clk); #1;
-        rst = 1'b0;
-        check("reset");
-        @(negedge clk);
+        total = total + 1;
+        if (add_done !== 1'b1) begin errors = errors + 1; $display("MISMATCH add_done should be 1"); end
+        start_add <= 1'b0;
+        @(posedge clk); #1;
+        total = total + 1;
+        if (add_done !== 1'b0) begin errors = errors + 1; $display("MISMATCH add_done should return to 0"); end
 
-        $display("----------------------------------------------");
-        $display("checks = %0d   errors = %0d", checks, errors);
-        if (errors == 0) $display("TEST PASSED");
-        else             $display("TEST FAILED");
-        $display("----------------------------------------------");
+        // accum holds when start_add = 0
+        begin : hold_test
+            reg [15:0] held;
+            held = accum_out;
+            @(negedge clk); operand_b <= 16'h4000; start_add <= 1'b0;
+            @(posedge clk); @(posedge clk); #1;
+            check(accum_out, held, 0, 16'h4000, "hold without start_add");
+        end
+
+        // clr_accum has priority over start_add
+        @(negedge clk); operand_b <= 16'h3E00; start_add <= 1'b1; clr_accum <= 1'b1;
+        @(posedge clk); #1;
+        start_add <= 1'b0; clr_accum <= 1'b0;
+        check(accum_out, 16'h0000, 0, 16'h3E00, "clr priority over start");
+
+        // synchronous reset
+        do_add(16'h3E00);
+        @(negedge clk); rst <= 1'b1;
+        @(posedge clk); #1; rst <= 1'b0;
+        check(accum_out, 16'h0000, 0, 0, "reset");
+
+        // ===================== 3. file vectors =====================
+        $display("--- file vectors ---");
+        for (i = 0; i < NMAX; i = i + 1)   vecab[i]  = 16'hxxxx;
+        for (i = 0; i < NMAX/2; i = i + 1) vecexp[i] = 16'hxxxx;
+        $readmemh("answer/code/sim/vec_add_ab.mem",  vecab);
+        $readmemh("answer/code/sim/vec_add_exp.mem", vecexp);
+        NV = 0;
+        for (i = 0; i < NMAX/2; i = i + 1)
+            if (vecab[i*2] !== 16'hxxxx) NV = i + 1;
+        $display("loaded %0d vector pairs", NV);
+        if (NV == 0) begin
+            errors = errors + 1;
+            $display("ERROR: no vectors found (run gen_vec_add_ca2.py and put the .mem files in answer/code/sim/)");
+        end
+        for (i = 0; i < NV; i = i + 1)
+            pair(vecab[i*2], vecab[i*2+1], vecexp[i], "file vec");
+
+        $display("ADDER-TB: checks=%0d errors=%0d", total, errors);
+        if (errors == 0) $display("ADDER-TB PASS");
+        else             $display("ADDER-TB FAIL");
         $finish;
     end
+
+    initial begin #500000000 $display("TIMEOUT"); $finish; end
+
 endmodule
