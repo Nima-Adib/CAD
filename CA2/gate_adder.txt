@@ -1,0 +1,8 @@
+Module: fp16_adder
+Gate Count: 2361
+
+Cell breakdown (hierarchical actel_gates + accumulator):
+  c1 : 210 instances x 10 gates = 2100 gates
+  s2 :  20 instances x 13 gates =  260 gates
+Total Cells: 230
+Total Gates: 2361

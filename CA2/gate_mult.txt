@@ -1,0 +1,10 @@
+Module: fp16_multiplier
+Gate Count: 3177
+
+Cell breakdown:
+  c1 :   3 instances x 10 gates =   30 gates
+  c2 : 266 instances x 11 gates = 2926 gates
+  s1 :   1 instance  x 13 gates =   13 gates
+  s2 :  16 instances x 13 gates =  208 gates
+Total Cells: 286
+Total Gates: 3177

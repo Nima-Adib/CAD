@@ -1,4 +1,3 @@
-
 .RECIPEPREFIX := >
 
 MODELSIM_BIN ?= E:/intelFPGA/20.1/modelsim_ase/win32aloem
@@ -13,6 +12,10 @@ VMAP ?= $(MODELSIM_BIN)/vmap.exe
 
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2
+
+# ping-pong testbench: file name and top-level module name
+PP_TB  ?= tb_ping_pong_buffer
+PP_FILE ?= $(TB_DIR)/$(PP_TB).v
 
 RTL := $(SRC_DIR)/fp16_multiplier.v \
        $(SRC_DIR)/fp16_adder.v \
@@ -30,9 +33,9 @@ RTL := $(SRC_DIR)/fp16_multiplier.v \
 
 VLOG_FLAGS := -sv -work $(WORK) +acc
 
-.PHONY: all lib rtl mult add add_old top dbg wave vec vec_add clean c1 c2 s2-s1
+.PHONY: all lib rtl mult add add_old pingpong top dbg wave vec_add clean c1 c2 s2-s1
 
-all: mult add top
+all: top mult add pingpong
 
 $(WORK)/_info:
 > $(VLIB) $(WORK)
@@ -55,16 +58,21 @@ s2-s1:
 cpp: c1 c2 s2-s1
 
 mult: rtl
-> $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fp16_mult_unit.v
-> $(VSIM) -c -work $(WORK) tb_fp16_mult_unit -do "run -all; quit -f"
+> $(VLOG) $(VLOG_FLAGS) $(SRC_DIR)/fp16_multiplier.v $(TB_DIR)/tb_fp16_multiplier.v
+> $(VSIM) -c -work $(WORK) tb_fp16_multiplier -do "run -all; quit -f"
 
 add: cpp lib
 > $(VLOG) $(VLOG_FLAGS) $(SRC_DIR)/fp16_adder.v $(TB_DIR)/tb_fp16_adder.v
 > $(VSIM) -c -work $(WORK) tb_fp16_adder -do "run -all; quit -f"
 
+pingpong: rtl
+> $(VLOG) $(VLOG_FLAGS) $(SRC_DIR)/ping_pong_buffer.v $(TB_DIR)/tb_ping_pong_buffer.v
+> $(VSIM) -c -work $(WORK) tb_ping_pong_buffer -do "run -all; quit -f"
+
 add_old: rtl
 > $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fp16_add_unit.v
 > $(VSIM) -c -work $(WORK) tb_fp16_add_unit -do "run -all; quit -f"
+
 
 top: cpp rtl
 > $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fcnn_top.v
@@ -78,12 +86,8 @@ wave: rtl
 > $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fcnn_top.v
 > $(VSIM) -work $(WORK) tb_fcnn_top -do "add wave -r /tb_fcnn_top/dut/*; run -all"
 
-vec:
-> cd answer/code/sim && py gen_vec.py
-
 vec_add:
 > cd answer/code/sim && py gen_vec_add_ca2.py
 
 clean:
 > rm -rf $(WORK) transcript vsim.wdb *.vcd modelsim.ini
-

@@ -1,0 +1,9 @@
+Module: ping_pong_buffer
+Gate Count: 3321
+
+Cell breakdown:
+  s1 : 224 instances x 13 gates = 2912 gates
+  s2 :  23 instances x 13 gates =  299 gates
+  c1 :  11 instances x 10 gates =  110 gates
+Total Cells: 258
+Total Gates: 3321
