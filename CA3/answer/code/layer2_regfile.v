@@ -8,11 +8,9 @@
 //                 rf[8+d], written directly from the raw FP16 adder output.
 //                 The write range (8..17) never overlaps the read range
 //                 (0..7), so no staging array / deferred transfer needed.
-//               Write is synchronous, read (rd_data) is asynchronous, and
-//               all_outputs exposes the 10 LOGITS only: digit d at slices
-//               [159-16d -: 16] (digit 0 = rf[8] at [159:144]).
-//               argmax uses a monotonic key (sign-magnitude linearized) and a
-//               strict '>' chain, so equal logits resolve to the lowest index.
+//               Write is synchronous, read (rd_data) is asynchronous.
+//               CA2: the all_outputs bus was removed; the testbench reads the
+//               logits directly as rf[8+d].
 // ============================================================================
 `timescale 1ns/1ps
 
@@ -23,8 +21,7 @@ module layer2_regfile (
     input  wire [4:0]  wr_addr,          // 0..7 = L1, 8..17 = L2
     input  wire [15:0] wr_data,
     input  wire [4:0]  rd_addr,          // operand reads target rf[0..7]
-    output wire [15:0] rd_data,          // asynchronous read
-    output wire [159:0] all_outputs      // {rf[8],rf[9],...}: digit d = [159-16d -: 16]
+    output wire [15:0] rd_data           // asynchronous read
 );
 
     reg [15:0] rf [0:17];
@@ -39,7 +36,5 @@ module layer2_regfile (
     end
 
     assign rd_data     = rf[rd_addr];
-    assign all_outputs = {rf[8], rf[9], rf[10], rf[11], rf[12],
-                          rf[13], rf[14], rf[15], rf[16], rf[17]};
 
 endmodule

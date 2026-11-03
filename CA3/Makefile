@@ -17,6 +17,10 @@ CXXFLAGS ?= -std=c++17 -O2
 PP_TB  ?= tb_ping_pong_buffer
 PP_FILE ?= $(TB_DIR)/$(PP_TB).v
 
+# phase-2 full-circuit testbench (instructors' TB adapted to our names)
+TOP_TB ?= tb_Top
+TOP_FILE ?= $(TB_DIR)/TB.v
+
 RTL := $(SRC_DIR)/fp16_multiplier.v \
        $(SRC_DIR)/fp16_adder.v \
        $(SRC_DIR)/fp16_adder_model.v \
@@ -33,7 +37,7 @@ RTL := $(SRC_DIR)/fp16_multiplier.v \
 
 VLOG_FLAGS := -sv -work $(WORK) +acc
 
-.PHONY: all lib rtl mult add add_old pingpong top dbg wave vec_add clean c1 c2 s2-s1
+.PHONY: all lib rtl mult add add_old pingpong top dbg wave vec_add clean c1 c2 s2-s1 cpp
 
 all: top mult add pingpong
 
@@ -73,18 +77,18 @@ add_old: rtl
 > $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fp16_add_unit.v
 > $(VSIM) -c -work $(WORK) tb_fp16_add_unit -do "run -all; quit -f"
 
-
+# full circuit: instructors' TB (reads u_dp.u_rf.rf[8..17] hierarchically)
 top: cpp rtl
-> $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fcnn_top.v
-> $(VSIM) -c -work $(WORK) tb_fcnn_top -do "run -all; quit -f"
+> $(VLOG) $(VLOG_FLAGS) $(TOP_FILE)
+> $(VSIM) -c -work $(WORK) $(TOP_TB) -do "run -all; quit -f"
 
 dbg: rtl
 > $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_dbg.v
 > $(VSIM) -c -work $(WORK) tb_dbg -do "run -all; quit -f"
 
 wave: rtl
-> $(VLOG) $(VLOG_FLAGS) $(TB_DIR)/tb_fcnn_top.v
-> $(VSIM) -work $(WORK) tb_fcnn_top -do "add wave -r /tb_fcnn_top/dut/*; run -all"
+> $(VLOG) $(VLOG_FLAGS) $(TOP_FILE)
+> $(VSIM) -work $(WORK) $(TOP_TB) -do "add wave -r /$(TOP_TB)/uut/*; run -all"
 
 vec_add:
 > cd answer/code/sim && py gen_vec_add_ca2.py

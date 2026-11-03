@@ -72,7 +72,6 @@ module fcnn_controller (
     output reg  [3:0]  l2_wr_addr,
     output reg  [3:0]  l2_rd_addr,
     // status outputs
-    output reg         busy,
     output reg         done
 );
 
@@ -313,7 +312,6 @@ module fcnn_controller (
 
     // ---------------- status ----------------
     always @* begin
-        busy = (state != S_IDLE);
         done = (state == S_DONE);
     end
 

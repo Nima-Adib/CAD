@@ -5,7 +5,8 @@
 //               FP16 multiplier + ping-pong buffer + the single FP16 adder
 //               (internal accumulator) + ReLU + 18-entry layer-2 regfile
 //               (rf[0..7] = L1 activations, rf[8..17] = direct-written
-//               logits) + bias ROM + ArgMax.
+//               logits) + bias ROM.  (CA2: no ArgMax / no parallel logit
+//               output - the testbench reads u_rf.rf[8..17] directly.)
 //
 //               Prefetch / zero-stall read engine contract:
 //                 - The controller issues one SRAM row read (read_en pulse);
@@ -69,10 +70,7 @@ module fcnn_datapath (
     // ---- register file control ----
     input  wire         l2_wr_en,
     input  wire [3:0]   l2_wr_addr,
-    input  wire [3:0]   l2_rd_addr,
-    // ---- final outputs ----
-    output wire [159:0] logits_out,       // = all_outputs (digit 0 = rf[8] at [159:144])
-    output wire [3:0]   pred_digit
+    input  wire [3:0]   l2_rd_addr
 );
 
     // ================= internal signals =================
@@ -82,7 +80,6 @@ module fcnn_datapath (
     reg  [15:0]   w_regs  [0:6];
     reg  [15:0]   x_regs  [0:6];
     wire [15:0]   rf_rd_data, rf_wr_data;
-    wire [159:0]  rf_all;
     wire          rf_wr_en;
     wire [4:0]    rf_wr_addr;
     wire [15:0]   mult_a, mult_b, mult_result;
@@ -125,7 +122,7 @@ module fcnn_datapath (
     // ================= register file (async read, 18 entries) =================
     layer2_regfile u_rf (.clk(clk), .rst(rst),
         .wr_en(rf_wr_en), .wr_addr(rf_wr_addr), .wr_data(rf_wr_data),
-        .rd_addr({1'b0, l2_rd_addr}), .rd_data(rf_rd_data), .all_outputs(rf_all));
+        .rd_addr({1'b0, l2_rd_addr}), .rd_data(rf_rd_data));
 
     // ================= the single FP16 multiplier =================
     assign mult_a = w_reg[mult_elem_sel];
@@ -181,33 +178,5 @@ module fcnn_datapath (
     reg [15:0] bias_rom [0:17];
     initial $readmemh("assets/bias.mem", bias_rom);
     assign bias_val = bias_rom[bias_addr];
-
-    // ================= outputs =================
-    assign logits_out = rf_all;
-
-    // ArgMax over the 10 logits with a monotone key transform:
-    //   key = fp[15] ? {1'b0, ~fp[14:0]} : {1'b1, fp[14:0]}
-    // (linearizes sign-magnitude order; strict '>' keeps lowest index on ties)
-    function [15:0] mono_key;
-        input [15:0] v;
-        begin
-            mono_key = v[15] ? {1'b0, ~v[14:0]} : {1'b1, v[14:0]};
-        end
-    endfunction
-
-    reg  [3:0]  best_idx;
-    reg  [15:0] best_key;
-    integer m;
-    always @* begin
-        best_idx = 4'd0;
-        best_key = mono_key(logits_out[159:144]);
-        for (m = 1; m < 10; m = m + 1) begin
-            if (mono_key(logits_out[(159 - 16*m) -: 16]) > best_key) begin
-                best_key = mono_key(logits_out[(159 - 16*m) -: 16]);
-                best_idx = m[3:0];
-            end
-        end
-    end
-    assign pred_digit = best_idx;
 
 endmodule

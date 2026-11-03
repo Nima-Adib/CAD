@@ -6,8 +6,8 @@
 //               with FP16 (IEEE 754 half) arithmetic under the resource
 //               constraints: exactly 1 multiplier + 1 adder (Q3), ReLU only
 //               on layer 1 (Q4), bias added LAST (Q6).
-//               Outputs: 10 parallel logits (16 bit each), the predicted
-//               digit and the done busy handshake.
+//               CA2: only the done handshake is exported; the 10 logits are
+//               read by the testbench from u_dp.u_rf.rf[8..17].
 // ============================================================================
 `timescale 1ns/1ps
 
@@ -15,10 +15,7 @@ module fcnn_top (
     input  wire         clk,
     input  wire         rst,
     input  wire         start,
-    output wire         busy,
-    output wire         done,
-    output wire [159:0] logits_out,    // 10 L2 outputs, logits[d] at [159-16d -: 16] (d=0 on the MSBs)
-    output wire [3:0]   pred_digit     // ArgMax over logits_out
+    output wire         done
 );
 
     // ---------------- controller -> datapath control ----------------
@@ -75,7 +72,6 @@ module fcnn_top (
         .l2_wr_en     (l2_wr_en),
         .l2_wr_addr   (l2_wr_addr),
         .l2_rd_addr   (l2_rd_addr),
-        .busy         (busy),
         .done         (done)
     );
 
@@ -104,9 +100,7 @@ module fcnn_top (
         .bias_addr      (bias_addr),
         .l2_wr_en       (l2_wr_en),
         .l2_wr_addr     (l2_wr_addr),
-        .l2_rd_addr     (l2_rd_addr),
-        .logits_out     (logits_out),
-        .pred_digit     (pred_digit)
+        .l2_rd_addr     (l2_rd_addr)
     );
 
 endmodule
