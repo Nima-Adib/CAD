@@ -122,3 +122,101 @@ module g_ovf (input q4, c5, os, output y);
     c1 u (.A0(os), .A1(1'b1), .SA(c5), .B0(1'b0), .B1(1'b0), .SB(1'b0),
           .S0(q4), .S1(1'b0), .f(y));
 endmodule
+
+// ============================================================================
+// Extra gates used by the controller (fcnn_controller).  Same rule as above:
+// every combinational gate is exactly ONE c1, every register exactly ONE s2.
+//
+//   s2 :  Q <= (A1 | B1) ? ((A0 & B0) ? D11 : D10)
+//                        : ((A0 & B0) ? D01 : D00)      (CLR = async clear)
+// ============================================================================
+
+// y = ~(a | b | c)
+module g_nor3 (input a, b, c, output y);
+    c1 u (.A0(1'b1), .A1(1'b0), .SA(c), .B0(1'b0), .B1(1'b0), .SB(1'b0),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// y = a | b | c
+module g_or3 (input a, b, c, output y);
+    c1 u (.A0(1'b0), .A1(1'b1), .SA(c), .B0(1'b1), .B1(1'b1), .SB(1'b0),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// y = a | b | ~c
+module g_or2n (input a, b, c, output y);
+    c1 u (.A0(1'b1), .A1(1'b0), .SA(c), .B0(1'b1), .B1(1'b1), .SB(1'b0),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// y = ~(a & b)
+module g_nand (input a, b, output y);
+    c1 u (.A0(1'b1), .A1(1'b1), .SA(1'b0), .B0(1'b1), .B1(1'b0), .SB(b),
+          .S0(a), .S1(1'b0), .f(y));
+endmodule
+
+// y = ~(a & b) & c
+module g_nand_and (input a, b, c, output y);
+    c1 u (.A0(c), .A1(c), .SA(1'b0), .B0(c), .B1(1'b0), .SB(b),
+          .S0(a), .S1(1'b0), .f(y));
+endmodule
+
+// y = ~(a | b) & c & d
+module g_nor2_and (input a, b, c, d, output y);
+    c1 u (.A0(1'b0), .A1(d), .SA(c), .B0(1'b0), .B1(1'b0), .SB(1'b0),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// y = (a | b) & c & d
+module g_or_and2 (input a, b, c, d, output y);
+    c1 u (.A0(1'b0), .A1(1'b0), .SA(1'b0), .B0(1'b0), .B1(d), .SB(c),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// y = (a | b) & ~c & d
+module g_or_andn (input a, b, c, d, output y);
+    c1 u (.A0(1'b0), .A1(1'b0), .SA(1'b0), .B0(d), .B1(1'b0), .SB(c),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// y = a | (b & c)
+module g_ao (input a, b, c, output y);
+    c1 u (.A0(1'b0), .A1(c), .SA(b), .B0(1'b1), .B1(1'b1), .SB(1'b0),
+          .S0(a), .S1(1'b0), .f(y));
+endmodule
+
+// majority (full-adder carry) : y = ab | ac | bc
+module g_maj (input a, b, c, output y);
+    c1 u (.A0(1'b0), .A1(c), .SA(b), .B0(c), .B1(1'b1), .SB(b),
+          .S0(a), .S1(1'b0), .f(y));
+endmodule
+
+// masked xor : y = m & (a ^ b)
+module g_xand (input a, b, m, output y);
+    c1 u (.A0(1'b0), .A1(m), .SA(b), .B0(m), .B1(1'b0), .SB(b),
+          .S0(a), .S1(1'b0), .f(y));
+endmodule
+
+// masked xor with an OR-ed select : y = m & ((a | b) ^ c)
+module g_xand_o (input a, b, c, m, output y);
+    c1 u (.A0(1'b0), .A1(m), .SA(c), .B0(m), .B1(1'b0), .SB(c),
+          .S0(a), .S1(b), .f(y));
+endmodule
+
+// xor-or : y = a ? ~b : (b | e)      ( = (a ^ b) | e  whenever a & e == 0 )
+module g_xor_or (input a, b, e, output y);
+    c1 u (.A0(e), .A1(1'b1), .SA(b), .B0(1'b1), .B1(1'b0), .SB(b),
+          .S0(a), .S1(1'b0), .f(y));
+endmodule
+
+// ---------------------------------------------------------------------------
+// registers (one s2 each)
+// ---------------------------------------------------------------------------
+
+// toggle flip-flop, synchronous clear (nclr = 0) and asynchronous clear (clr):
+//     q <= nclr ? (q ^ (ta & tb)) : 0
+module g_tff (input clk, clr, ta, tb, nclr, output q);
+    s2 u (.D00(1'b0), .D01(nclr), .D10(nclr), .D11(1'b0),
+          .A1(q), .B1(1'b0), .A0(ta), .B0(tb),
+          .clr(clr), .clk(clk), .out(q));
+endmodule
