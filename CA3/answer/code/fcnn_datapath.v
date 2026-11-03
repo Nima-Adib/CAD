@@ -1,44 +1,90 @@
 // ============================================================================
-// Module      : fcnn_datapath  (Step 1.1, 2.x, 3.x, 6.x, 8.x of 05_plan.md)
-// Project     : HW1 - FP16 FCNN Accelerator for MNIST (IEEE 754 half)
-// Description : Integrated datapath: SRAM models + row regs + the single
-//               FP16 multiplier + ping-pong buffer + the single FP16 adder
-//               (internal accumulator) + ReLU + 18-entry layer-2 regfile
-//               (rf[0..7] = L1 activations, rf[8..17] = direct-written
-//               logits) + bias ROM.  (CA2: no ArgMax / no parallel logit
-//               output - the testbench reads u_rf.rf[8..17] directly.)
+// Module      : fcnn_datapath  (CA2 phase 2 - structural)
+// Description : Same datapath as phase 1 (SRAM models, row registers, the single
+//               multiplier, ping-pong buffer, the single adder, ReLU, 18-entry
+//               register file, bias ROM). Instance names (u_wmem, u_imem, u_mul,
+//               u_pp, u_add, u_relu, u_rf) and ports are unchanged.
 //
-//               Prefetch / zero-stall read engine contract:
-//                 - The controller issues one SRAM row read (read_en pulse);
-//                   the row arrives 7 cycles later as a 1-cycle data_valid
-//                   pulse. On EVERY valid pulse the datapath latches the 7
-//                   lanes into w_reg/x_reg, while the controller issues the
-//                   next row in the same cycle (back-to-back, one in flight).
-//                 - The multiplier consumes w_reg[beat]/x_reg[beat] with
-//                   mult_elem_sel = beat; the result registers at the beat
-//                   edge and mult_valid pulses the next cycle.
-//                 - buf_wr_en (controller RUN window) is windowed 1 cycle
-//                   internally so the trailing product of the last beat is
-//                   not lost; the ping-pong write occurs when
-//                   (mult_valid && wr_win).
-//                 - Adder kicks follow ACCEPTED ping-pong reads by 1 beat
-//                   (rd_hit delayed): the accumulator sums exactly one term
-//                   per drained product, in fill order.
-//               Bias add: the controller pulses add_start together with
-//               add_bias_sel=1; the adder operand mux switches to bias ROM.
+//               Only Actel gates (actel_gates.v) and s2 flip-flops are used.
+//               The SRAM models and the bias ROM are the phase-1 behavioral
+//               memories (not synthesized, not counted).
 //
-//               Write schemes (03_spec.md 2.6, 18-row layout):
-//                 l2_wr_en=1 && layer_sel==0 -> rf[l2_wr_addr]     <=
-//                    relu(accum)                                  (L1 STORE, rf[0..7])
-//                 l2_wr_en=1 && layer_sel==1 -> rf[8+l2_wr_addr]   <=
-//                    accum (raw adder output)                     (L2 STAGE, rf[8..17])
-//               The two ranges are disjoint: during L2 the multiplier keeps
-//               reading h0..h7 from rf[0..7] while each digit's raw result
-//               lands in rf[8..17], so a Read-After-Write hazard is
-//               structurally impossible and no staging array or
-//               deferred transfer exists.
+// Synthesis changes (behavior identical, checked with a cycle model of the
+// controller: operands seen by the multiplier match the phase-1 datapath on
+// every multiplier-enabled cycle):
+//   * ROW REGISTERS are parallel-load SHIFT registers (row_shift7):
+//        valid  -> load all 7 lanes      mult_en -> shift by one lane
+//     the multiplier reads lane 0 only. This replaces the two 7:1 operand
+//     muxes (w_reg[beat], x_reg[beat]): the s2 cell already contains the
+//     4:1 mux (hold / load / shift), so the muxes cost nothing here.
+//     (the controller's beat counter advances exactly once per RUN cycle and
+//      the next row always arrives at beat 6, so lane 0 == lane[beat].)
+//   * adder-kick / write-window / rf-address logic uses single c1 gates.
+//   * rd_hit = rd_en & (~empty | (swap & full)) in 2 cells
+//     (original: (rd_en&~empty) | (swap&full&empty&rd_en), same function).
 // ============================================================================
 `timescale 1ns/1ps
+
+// plain D flip-flop with asynchronous reset (1 x s2 = 13 gates)
+module dp_dff (
+    input  wire clk,
+    input  wire rst,
+    input  wire d,
+    output wire q
+);
+    s2 u_ff (.D00(d), .D01(d), .D10(d), .D11(d),
+             .A1(1'b0), .B1(1'b0), .A0(1'b0), .B0(1'b0),
+             .clr(rst), .clk(clk), .out(q));
+endmodule
+
+// 7 x 16-bit row register: parallel load (priority) / shift toward lane 0 / hold.
+// d and q use the SRAM layout: lane k = [111-16k -: 16]; q0 = lane 0 (current operand).
+module row_shift7 (
+    input  wire         clk,
+    input  wire         rst,
+    input  wire         load,       // sram data_valid
+    input  wire         shift,      // multiplier enable
+    input  wire [111:0] d,
+    output wire [15:0]  q0
+);
+    wire [111:0] q;
+    genvar k, b;
+    generate
+        for (k = 0; k < 7; k = k + 1) begin : g_lane
+            for (b = 0; b < 16; b = b + 1) begin : g_bit
+                // (S1,S0) = {shift,load}: 00 hold | 01 load | 10 shift | 11 load
+                if (k < 6) begin : g_mid
+                    s2 u_ff (.D00(q[96-16*k+b]), .D01(d[96-16*k+b]),
+                             .D10(q[80-16*k+b]), .D11(d[96-16*k+b]),
+                             .A1(shift), .B1(shift), .A0(load), .B0(load),
+                             .clr(rst), .clk(clk), .out(q[96-16*k+b]));
+                end else begin : g_last
+                    s2 u_ff (.D00(q[96-16*k+b]), .D01(d[96-16*k+b]),
+                             .D10(1'b0),         .D11(d[96-16*k+b]),
+                             .A1(shift), .B1(shift), .A0(load), .B0(load),
+                             .clr(rst), .clk(clk), .out(q[96-16*k+b]));
+                end
+            end
+        end
+    endgenerate
+    assign q0 = q[111:96];
+endmodule
+
+// rd_hit = r & (~e | (s & f))      (2 x c1)
+module dp_rd_hit (
+    input  wire r,      // buf_rd_en
+    input  wire s,      // buf_swap
+    input  wire f,      // buf_full
+    input  wire e,      // buf_empty
+    output wire y
+);
+    wire rf_;
+    g_and u_rf (.a(r), .b(f), .y(rf_));
+    // e=0 -> r ;  e=1 -> s ? (r&f) : 0
+    c1 u_y (.A0(r), .A1(1'b0), .SA(1'b0),
+            .B0(1'b0), .B1(rf_), .SB(s),
+            .S0(e), .S1(1'b0), .f(y));
+endmodule
 
 module fcnn_datapath (
     input  wire         clk,
@@ -52,7 +98,7 @@ module fcnn_datapath (
     output wire         sram_in_valid,
     // ---- multiplier / ping-pong control ----
     input  wire         mult_en,
-    input  wire [2:0]   mult_elem_sel,
+    input  wire [2:0]   mult_elem_sel,   // (unused: rows are shift registers, lane 0 = beat)
     output wire         mult_valid,
     input  wire         buf_wr_en,
     input  wire         buf_rd_en,
@@ -75,20 +121,17 @@ module fcnn_datapath (
 
     // ================= internal signals =================
     wire [111:0]  w_row_data, x_row_data;
-    wire [15:0]   w_reg   [0:6];
-    wire [15:0]   x_reg   [0:6];    // (reg arrays below; wires for muxing)
-    reg  [15:0]   w_regs  [0:6];
-    reg  [15:0]   x_regs  [0:6];
+    wire [15:0]   w_lane0, x_lane0;
     wire [15:0]   rf_rd_data, rf_wr_data;
     wire          rf_wr_en;
     wire [4:0]    rf_wr_addr;
     wire [15:0]   mult_a, mult_b, mult_result;
     wire          pp_bank_sel;
-    reg           wr_win;
+    wire          wr_win;
     wire [15:0]   pp_rd_data;
     wire [15:0]   bias_val, adder_op, accum_q, relu_out;
 
-    // ================= memory models =================
+    // ================= memory models (phase-1 behavioral, not counted) =================
     sram_weights_model u_wmem (.clk(clk), .rst(rst),
         .read_en(sram_w_read_en), .addr({1'b0, sram_w_addr}),
         .data_out(w_row_data), .data_valid(sram_w_valid));
@@ -96,28 +139,11 @@ module fcnn_datapath (
         .read_en(sram_in_read_en), .addr(sram_in_addr),
         .data_out(x_row_data), .data_valid(sram_in_valid));
 
-    // ================= row registers =================
-    // (unwrapped into reg arrays; w_reg/x_reg wires alias them for muxing)
-    integer ii;
-    always @(posedge clk) begin
-        if (rst) begin
-            for (ii = 0; ii < 7; ii = ii + 1) begin
-                w_regs[ii] <= 16'h0000;
-                x_regs[ii] <= 16'h0000;
-            end
-        end else begin
-            if (sram_w_valid)
-                for (ii = 0; ii < 7; ii = ii + 1)
-                    w_regs[ii] <= w_row_data[111 - 16*ii -: 16];
-            if (sram_in_valid)
-                for (ii = 0; ii < 7; ii = ii + 1)
-                    x_regs[ii] <= x_row_data[111 - 16*ii -: 16];
-        end
-    end
-    for (genvar gg = 0; gg < 7; gg = gg + 1) begin : alias_rows
-        assign w_reg[gg] = w_regs[gg];
-        assign x_reg[gg] = x_regs[gg];
-    end
+    // ================= row registers (shift registers, lane 0 = current beat) =================
+    row_shift7 u_wrow (.clk(clk), .rst(rst), .load(sram_w_valid),  .shift(mult_en),
+                       .d(w_row_data), .q0(w_lane0));
+    row_shift7 u_xrow (.clk(clk), .rst(rst), .load(sram_in_valid), .shift(mult_en),
+                       .d(x_row_data), .q0(x_lane0));
 
     // ================= register file (async read, 18 entries) =================
     layer2_regfile u_rf (.clk(clk), .rst(rst),
@@ -125,37 +151,42 @@ module fcnn_datapath (
         .rd_addr({1'b0, l2_rd_addr}), .rd_data(rf_rd_data));
 
     // ================= the single FP16 multiplier =================
-    assign mult_a = w_reg[mult_elem_sel];
-    assign mult_b = layer_sel ? rf_rd_data : x_reg[mult_elem_sel];
+    assign mult_a = w_lane0;
+    genvar b;
+    generate
+        for (b = 0; b < 16; b = b + 1) begin : g_mb
+            // mult_b = layer_sel ? rf_rd_data : x operand
+            g_mux2 u_mb (.a0(x_lane0[b]), .a1(rf_rd_data[b]), .s(layer_sel), .y(mult_b[b]));
+        end
+    endgenerate
     fp16_multiplier u_mul (.clk(clk), .rst(rst),
         .valid_in(mult_en), .a(mult_a), .b(mult_b),
         .result(mult_result), .valid_out(mult_valid));
 
     // ================= ping-pong buffer =================
     // 1-cycle write window: keeps the trailing product of the last beat
-    always @(posedge clk) begin
-        if (rst) wr_win <= 1'b0;
-        else     wr_win <= buf_wr_en;
-    end
+    dp_dff u_wwin (.clk(clk), .rst(rst), .d(buf_wr_en), .q(wr_win));
+    wire pp_wr_en;
+    g_and u_ppwe (.a(mult_valid), .b(wr_win), .y(pp_wr_en));
     ping_pong_buffer u_pp (.clk(clk), .rst(rst),
-        .wr_en(mult_valid && wr_win), .wr_data(mult_result),
+        .wr_en(pp_wr_en), .wr_data(mult_result),
         .rd_en(buf_rd_en), .swap_req(buf_swap),
         .rd_data(pp_rd_data), .wr_full(buf_full),
         .rd_empty(buf_empty), .bank_select(pp_bank_sel));
 
     // ================= the single FP16 adder (accumulator) =================
-    // rd_hit covers BOTH read kinds: a normal drain beat and the swap-cycle
-    // read (the swap handover consumes slot 0 of the freshly-filled bank in
-    // the same edge - skip it here and that product never reaches the adder).
-    wire rd_hit = (buf_rd_en && !buf_empty) ||
-                  (buf_swap && buf_full && buf_empty && buf_rd_en);
-    reg  rd_hit_d;
-    always @(posedge clk) begin
-        if (rst) rd_hit_d <= 1'b0;
-        else     rd_hit_d <= rd_hit;
-    end
-    assign adder_op    = add_bias_sel ? bias_val : pp_rd_data;
-    wire adder_kick = rd_hit_d || add_start;   // read kicks + bias kick
+    // rd_hit covers BOTH read kinds: a normal drain beat and the swap-cycle read.
+    wire rd_hit, rd_hit_d, adder_kick;
+    dp_rd_hit u_rdhit (.r(buf_rd_en), .s(buf_swap), .f(buf_full), .e(buf_empty), .y(rd_hit));
+    dp_dff    u_rdhd  (.clk(clk), .rst(rst), .d(rd_hit), .q(rd_hit_d));
+    g_or      u_kick  (.a(rd_hit_d), .b(add_start), .y(adder_kick));   // read kicks + bias kick
+
+    generate
+        for (b = 0; b < 16; b = b + 1) begin : g_op
+            // adder_op = add_bias_sel ? bias_val : pp_rd_data
+            g_mux2 u_op (.a0(pp_rd_data[b]), .a1(bias_val[b]), .s(add_bias_sel), .y(adder_op[b]));
+        end
+    endgenerate
     fp16_adder u_add (.clk(clk), .rst(rst),
         .clr_accum(accum_clr), .start_add(adder_kick),
         .operand_b(adder_op), .add_bias(add_bias_sel),
@@ -167,14 +198,18 @@ module fcnn_datapath (
     // ================= RF write side (direct, no staging) ============
     // L1 STORE : rf[l2_wr_addr]   <= relu(accum)   (rf[0..7])
     // L2 STAGE : rf[l2_wr_addr+8] <= accum         (rf[8..17], raw)
-    // ranges disjoint => L2 operand reads (rf[0..7]) can never race the
-    // digit writes, so the adder result goes straight into the regfile.
-    assign rf_wr_en   = l2_wr_en;
-    assign rf_wr_addr = layer_sel ? ({1'b0, l2_wr_addr} + 5'd8)
-                                  : {1'b0, l2_wr_addr};
-    assign rf_wr_data = layer_sel ? accum_q : relu_out;
+    // l2_wr_addr + 8 (layer_sel=1):  bit3 = ~d3, bit4 = d3 ; layer_sel=0: {0,d}
+    assign rf_wr_en = l2_wr_en;
+    assign rf_wr_addr[2:0] = l2_wr_addr[2:0];
+    g_xor u_wa3 (.a(l2_wr_addr[3]), .b(layer_sel), .y(rf_wr_addr[3]));
+    g_and u_wa4 (.a(layer_sel),     .b(l2_wr_addr[3]), .y(rf_wr_addr[4]));
+    generate
+        for (b = 0; b < 16; b = b + 1) begin : g_wd
+            g_mux2 u_wd (.a0(relu_out[b]), .a1(accum_q[b]), .s(layer_sel), .y(rf_wr_data[b]));
+        end
+    endgenerate
 
-    // ================= bias ROM =================
+    // ================= bias ROM (phase-1 behavioral memory, not counted) =================
     reg [15:0] bias_rom [0:17];
     initial $readmemh("assets/bias.mem", bias_rom);
     assign bias_val = bias_rom[bias_addr];
