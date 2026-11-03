@@ -23,14 +23,14 @@
 // Requires    : actel_gates.v, cells c1 / s2 (modules.v; s2 ports: ... clr, clk, out)
 // ============================================================================
 `timescale 1ns/1ps
-
+ 
 // y = ~(a | b) & c & d      (one c1: S0|S1 forces 0, else SA ? d : 0)
 module g_nor2_and2 (input a, b, c, d, output y);
     c1 u (.A0(1'b0), .A1(d), .SA(c), .B0(1'b0), .B1(1'b0), .SB(1'b0),
           .S0(a), .S1(b), .f(y));
 endmodule
-
-// One stored bit (1 x s2 = 13 gates)
+ 
+// One stored bit (1 x s2)
 module rf_bit (
     input  wire clk,
     input  wire rst,
@@ -45,8 +45,8 @@ module rf_bit (
              .A0(sel_hi), .B0(sel_lo),
              .clr(1'b0), .clk(clk), .out(q));
 endmodule
-
-// Write-enable predecoder (10 c1 = 100 gates)
+ 
+// Write-enable predecoder (10 c1)
 module rf_wr_decode (
     input  wire       wr_en,
     input  wire [4:0] a,
@@ -57,7 +57,7 @@ module rf_wr_decode (
     g_andn u_lo1 (.a(a[1]), .b(a[0]), .y(lo[1]));
     g_andn u_lo2 (.a(a[0]), .b(a[1]), .y(lo[2]));
     g_and  u_lo3 (.a(a[1]), .b(a[0]), .y(lo[3]));
-
+ 
     g_nor3_and  u_hi0 (.a(a[4]), .b(a[3]), .c(a[2]), .d(wr_en), .y(hi[0]));
     g_nor2_and2 u_hi1 (.a(a[4]), .b(a[3]), .c(a[2]), .d(wr_en), .y(hi[1]));
     g_nor2_and2 u_hi2 (.a(a[4]), .b(a[2]), .c(a[3]), .d(wr_en), .y(hi[2]));
@@ -66,8 +66,8 @@ module rf_wr_decode (
     g_andn u_hi3 (.a(a[4]), .b(t3), .y(hi[3]));
     g_nor2_and2 u_hi4 (.a(a[3]), .b(a[2]), .c(a[4]), .d(wr_en), .y(hi[4]));
 endmodule
-
-// 8:1 read mux for one bit (3 c1 = 30 gates)
+ 
+// 8:1 read mux for one bit (3 c1)
 module rf_rd_mux8 (
     input  wire [7:0] d,
     input  wire [2:0] s,
@@ -78,7 +78,7 @@ module rf_rd_mux8 (
     g_mux4 u_hi (.d0(d[4]), .d1(d[5]), .d2(d[6]), .d3(d[7]), .s1(s[1]), .s0(s[0]), .y(hi));
     g_mux2 u_fn (.a0(lo), .a1(hi), .s(s[2]), .y(y));
 endmodule
-
+ 
 module layer2_regfile (
     input  wire        clk,
     input  wire        rst,
@@ -88,38 +88,46 @@ module layer2_regfile (
     input  wire [4:0]  rd_addr,          // operand reads target rf[0..7] (bits [2:0] used)
     output wire [15:0] rd_data           // asynchronous read
 );
-
+ 
     wire [15:0] rf [0:17];               // exported for the testbench
-
+ 
     wire [3:0] sel_lo;
     wire [4:0] sel_hi;
     rf_wr_decode u_dec (.wr_en(wr_en), .a(wr_addr), .lo(sel_lo), .hi(sel_hi));
-
+ 
     genvar e, b;
     generate
-        for (e = 0; e < 18; e = e + 1) begin : g_reg
+        // ---- L1 registers rf[0..7]: 15 flip-flops, bit 15 = zero -----------
+        for (e = 0; e < 8; e = e + 1) begin : g_l1
+            wire [15:0] q;
+            for (b = 0; b < 15; b = b + 1) begin : g_bit
+                rf_bit u_bit (.clk(clk), .rst(rst),
+                              .sel_hi(sel_hi[e / 4]), .sel_lo(sel_lo[e % 4]),
+                              .d(wr_data[b]), .q(q[b]));
+            end
+            assign q[15] = 1'b0;                 // L1 values are never negative
+            assign rf[e] = q;
+        end
+ 
+        // ---- L2 registers rf[8..17]: all 16 bits are flip-flops ------------
+        for (e = 8; e < 18; e = e + 1) begin : g_l2
             wire [15:0] q;
             for (b = 0; b < 16; b = b + 1) begin : g_bit
-                if (e < 8 && b == 15) begin : g_zero
-                    assign q[b] = 1'b0;          // L1 values are never negative
-                end else begin : g_ff
-                    rf_bit u_bit (.clk(clk), .rst(rst),
-                                  .sel_hi(sel_hi[e / 4]), .sel_lo(sel_lo[e % 4]),
-                                  .d(wr_data[b]), .q(q[b]));
-                end
+                rf_bit u_bit (.clk(clk), .rst(rst),
+                              .sel_hi(sel_hi[e / 4]), .sel_lo(sel_lo[e % 4]),
+                              .d(wr_data[b]), .q(q[b]));
             end
             assign rf[e] = q;
         end
-    endgenerate
-
-    // asynchronous read of rf[0..7]
-    generate
+ 
+        // ---- asynchronous read of rf[0..7] ---------------------------------
         for (b = 0; b < 15; b = b + 1) begin : g_rd
             rf_rd_mux8 u_mux (.d({rf[7][b], rf[6][b], rf[5][b], rf[4][b],
                                   rf[3][b], rf[2][b], rf[1][b], rf[0][b]}),
                               .s(rd_addr[2:0]), .y(rd_data[b]));
         end
     endgenerate
+ 
     assign rd_data[15] = 1'b0;
-
+ 
 endmodule
